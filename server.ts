@@ -2,7 +2,7 @@
  * Copyright (c) 2014-2026 Bjoern Kimminich & the OWASP Juice Shop contributors.
  * SPDX-License-Identifier: MIT
  */
-// Trigger CodeMender CI/CD Guardrail scan
+// Trigger CodeMender CI/CD Guardrail scan - retry 2
 import i18n from 'i18n'
 import cors from 'cors'
 import fs from 'node:fs'
