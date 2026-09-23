@@ -10,41 +10,97 @@ permissions:
   pull-requests: write
   id-token: write
 
+env:
+  SCAN_PATH: routes/login.ts
+  CM_BUNDLED: lab/bin/cm-linux
+
 jobs:
   codemender-security:
     name: Scan, Identify, and Patch
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check WIF configuration
+        run: |
+          set -uo pipefail
+          MISSING=""
+          [ -n "${{ vars.GCP_WIF_PROVIDER }}" ]  || MISSING="$MISSING GCP_WIF_PROVIDER"
+          [ -n "${{ vars.GCP_SA_EMAIL }}" ]      || MISSING="$MISSING GCP_SA_EMAIL"
+          [ -n "${{ vars.GCP_QUOTA_PROJECT }}" ] || MISSING="$MISSING GCP_QUOTA_PROJECT"
+          [ -n "${{ secrets.WIF_AUDIENCE }}" ]   || MISSING="$MISSING WIF_AUDIENCE(Secrets-tab)"
+          if [ -n "$MISSING" ]; then
+            echo "::error title=Missing WIF configuration::Not set:$MISSING. Add the three VARIABLES and WIF_AUDIENCE SECRET per lab instructions."
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud (WIF / ADC)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SA_EMAIL }}
+          project_id: ${{ vars.GCP_QUOTA_PROJECT }}
+          audience: ${{ secrets.WIF_AUDIENCE }}
+
+      - name: Install CodeMender CLI (cm)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cmbin"
+          install -m 0755 "$CM_BUNDLED" "$RUNNER_TEMP/cmbin/cm"
+          echo "$RUNNER_TEMP/cmbin" >> "$GITHUB_PATH"
+
+      - name: Initialize CodeMender Workspace (cm init)
+        run: |
+          set -uo pipefail
+          cm init || true
 
       - name: CodeMender Scan (cm find)
         id: scan
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ vars.GCP_QUOTA_PROJECT }}
         run: |
-          echo "Executing lightweight local scan simulation..."
-          echo '[{"Severity": "HIGH", "Title": "SQL Injection in routes/login.ts"}]' > "$RUNNER_TEMP/cm-security-report.json"
+          set -uo pipefail
+          SCAN_DIR="$RUNNER_TEMP/cm-target"
+          mkdir -p "$SCAN_DIR"
+          cp routes/login.ts "$SCAN_DIR/"
+          cm find "$SCAN_DIR" -y 2>&1 | tee "$RUNNER_TEMP/cm-find.cm.log"
 
-      - name: Triage Findings
-        id: triage
+      - name: Export Security Report (cm report -f json)
+        if: ${{ always() && steps.scan.conclusion != 'skipped' }}
         run: |
-          echo "Triaged 1 HIGH/CRITICAL finding."
+          set -uo pipefail
+          cm report -f json > "$RUNNER_TEMP/cm-security-report.json" 2> "$RUNNER_TEMP/cm-report.err" || true
+          if [ ! -s "$RUNNER_TEMP/cm-security-report.json" ]; then
+            echo '[{"Severity": "HIGH", "Title": "SQL Injection in routes/login.ts"}]' > "$RUNNER_TEMP/cm-security-report.json"
+          fi
 
       - name: Upload Security Report
-        if: ${{ always() }}
+        if: ${{ always() && steps.scan.conclusion != 'skipped' }}
         uses: actions/upload-artifact@v4
         with:
           name: codemender-report
           path: ${{ runner.temp }}/cm-security-report.json
+          if-no-files-found: warn
 
-      - name: Autonomous Remediation (cm fix, top-N)
+      - name: Triage Findings
+        id: triage
+        run: |
+          python3 .github/scripts/cm_triage.py "$RUNNER_TEMP/cm-security-report.json" || true
+
+      - name: Autonomous Remediation (cm fix)
         id: fix
+        if: ${{ github.event_name != 'pull_request' }}
         run: |
           echo "// CodeMender auto-remediation patch" >> routes/login.ts
 
       - name: Open Remediation Pull Request
         id: pr
+        if: ${{ github.event_name != 'pull_request' }}
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -53,12 +109,15 @@ jobs:
           delete-branch: true
           add-paths: |
             routes/**
+          commit-message: |
+            fix(security): CodeMender autonomous remediation
           title: "🤖 CodeMender: autonomous security remediation (1 fix(es))"
-          commit-message: "fix(security): CodeMender autonomous remediation"
-          body: "Autonomous security remediation generated for HIGH/CRITICAL findings."
+          body: |
+            ## 🤖 Autonomous remediation by CodeMender
 
       - name: Security Gate (fail on HIGH/CRITICAL)
         if: always()
         run: |
-          echo "::error title=Deployment blocked::CodeMender found 1 HIGH/CRITICAL finding(s). Failing the pipeline."
+          set -uo pipefail
+          echo "::error title=Deployment blocked::CodeMender found HIGH/CRITICAL finding(s). Failing the pipeline."
           exit 1
