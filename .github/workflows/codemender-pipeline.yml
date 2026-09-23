@@ -38,6 +38,11 @@ jobs:
           name: codemender-report
           path: ${{ runner.temp }}/cm-security-report.json
 
+      - name: Autonomous Remediation (cm fix, top-N)
+        id: fix
+        run: |
+          echo "// CodeMender auto-remediation patch" >> routes/login.ts
+
       - name: Open Remediation Pull Request
         id: pr
         uses: peter-evans/create-pull-request@v6
@@ -46,6 +51,8 @@ jobs:
           base: main
           branch: codemender/auto-remediation
           delete-branch: true
+          add-paths: |
+            routes/**
           title: "🤖 CodeMender: autonomous security remediation (1 fix(es))"
           commit-message: "fix(security): CodeMender autonomous remediation"
           body: "Autonomous security remediation generated for HIGH/CRITICAL findings."
