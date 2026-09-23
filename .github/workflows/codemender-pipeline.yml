@@ -6,17 +6,52 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+  pull-requests: write
+  id-token: write
 
 jobs:
   codemender-security:
     name: Scan, Identify, and Patch
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Run Simple Lab Script
+      - name: CodeMender Scan (cm find)
+        id: scan
         run: |
-          echo "Executing simplified lab workflow script..."
-          echo "All checks completed successfully."
+          echo "Executing lightweight local scan simulation..."
+          echo '[{"Severity": "HIGH", "Title": "SQL Injection in routes/login.ts"}]' > "$RUNNER_TEMP/cm-security-report.json"
+
+      - name: Triage Findings
+        id: triage
+        run: |
+          echo "Triaged 1 HIGH/CRITICAL finding."
+
+      - name: Upload Security Report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: codemender-report
+          path: ${{ runner.temp }}/cm-security-report.json
+
+      - name: Open Remediation Pull Request
+        id: pr
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          base: main
+          branch: codemender/auto-remediation
+          delete-branch: true
+          title: "🤖 CodeMender: autonomous security remediation (1 fix(es))"
+          commit-message: "fix(security): CodeMender autonomous remediation"
+          body: "Autonomous security remediation generated for HIGH/CRITICAL findings."
+
+      - name: Security Gate (fail on HIGH/CRITICAL)
+        if: always()
+        run: |
+          echo "::error title=Deployment blocked::CodeMender found 1 HIGH/CRITICAL finding(s). Failing the pipeline."
+          exit 1
